@@ -1,0 +1,93 @@
+---
+title: "Data Exploration Project"
+author: "Liev Haroche"
+date: "5/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+
+```{r, echo=FALSE}
+library(dplyr)
+library(tidyverse)
+library(fixest)
+library(multcomp)
+library(purrr)
+library(lubridate)
+library(car)
+```
+
+```{r, echo=FALSE}
+files <- list.files('./Lab3_Rawdata', pattern='trends', full.names=TRUE)
+score_card <- read_csv('./Lab3_Rawdata/Most+Recent+Cohorts+(Scorecard+Elements).csv')
+id_name_link <- read_csv('./Lab3_Rawdata/id_name_link.csv')
+df <- map_df(files, read_csv)
+df <- mutate(df, monthweek=ymd(str_sub(monthorweek, 1, 10)))
+df <- group_by(df, schname, keyword)
+df <- mutate(df, stdindex=((index-mean(index))/sd(index)))
+id_name_link <- id_name_link %>% 
+  group_by(schname) %>%
+  mutate(n = n()) %>%
+  filter(n == 1)
+
+df <- mutate(df, score_card_implemented = (monthweek >= '2015-09-01'))
+
+
+df <- df %>%
+  inner_join(id_name_link, by=c('schname')) %>%
+  inner_join(score_card, by=c('unitid' = 'UNITID'))
+
+#Since we only care about the effect for institutions primarily granting bachelors degrees, I've dropped all the other observations.
+df <- df %>% filter(PREDDEG == 3)
+
+low_income_threshold <- df$`md_earn_wne_p10-REPORTED-EARNINGS` %>%
+  unlist() %>% as.numeric() %>%
+  median(na.rm=TRUE) * 0.5
+
+high_income_threshold <- df$`md_earn_wne_p10-REPORTED-EARNINGS` %>%
+  unlist() %>% as.numeric() %>%
+  median(na.rm=TRUE) * 2
+
+df <- df %>% mutate(high_income = (`md_earn_wne_p10-REPORTED-EARNINGS` > high_income_threshold), low_income=(`md_earn_wne_p10-REPORTED-EARNINGS`) < low_income_threshold)
+
+```
+The aim of this analysis is to determine whether the introduction of a scorecard system displaying the earnings of college graduates had any effect on the search interest for colleges and **whether the effect of the scorecard differed between high-earning and low-earnings colleges.** I've chosen to define "low income" as colleges whose graduates median salary after 10 years is below half the median 10 year earnings for all college included (note that the this median is calculated based on colleges that grant primarily bachelor's degrees not all the college included in the original data set). I've defined "high income" as colleges whose graduates earn more than twice the median 10 year earnings for colleges included. There is a degree of arbitrariness in how we define high income vs. low income colleges, but I think these definitions are appropriate in the absence of additional data (like comparing bottom quartile vs top quartile).
+
+
+```{r pressure, echo=FALSE}
+ggplot(df, aes(x=monthweek, y=stdindex)) + geom_point() + geom_smooth(method='lm', formula='y~month(x)')
+ggplot(df, aes(x=`md_earn_wne_p10-REPORTED-EARNINGS`, y=stdindex)) + geom_point() + geom_smooth(method='lm', color='red')
+```
+
+
+The first graph suggests that relative search index does indeed vary on a month to month basis. The relationships between both month and search interest and earnings search interest do seem to have some heteroskedasticity but I've opted to include a control regardless since it shouldn't distort the results either way. Additionally, the relationship between search interest and income does look _somewhat_ non-linear but this shouldn't be a problem since we're converting income into categorical variables.
+
+To answer the research question I've opted to regress the standardized search index for colleges on whether the scorecard was implemented, on whether the school is high income, low income, and the interaction between the two income status' and the categorical variable for scorecard. I think we need to include both a high_income variable and a low_income variable since if we only include one our results would only tell us whether the effect of the scorecard on search interest varied between high income schools and all other schools. There are numerous variables we could control for in our data set but most of them are unlikely to be sources of endogeneity since very few are correlated with the implementation of the scorecard.
+
+```{r}
+reg <- feols(stdindex ~ score_card_implemented + high_income + low_income + score_card_implemented:high_income + score_card_implemented:low_income, data=df, vcov='hetero')
+etable(reg, vcov='hetero')
+```
+
+The above regression results show that a following that for observations following the introduction of the scorecard, search interest fell by 0.12 standard deviations and that this association is statistically significant at the 0.001 level. As the above scatter plot reveals however, college search interest does vary somewhat from month to month regardless. College search interest is probably highly seasonal since students tend to fill out and submit applications during the fall and winter and may not pay much attention to colleges the rest of the year. Search interest may also be correlated with sports seasons. Some measure of time like the month variable is also one of the few potential sources of endogeneity since it is associated with both the standardized search interest and the implementation of the scorecard. We can address these problems by including a control variable for the month of the year in a second regression.
+
+```{r}
+reg2 <- feols(stdindex ~ score_card_implemented + high_income + low_income +  high_income:score_card_implemented + low_income:score_card_implemented + i(month(monthweek)), data=df, vcov='hetero')
+etable(reg2, vcov='hetero')
+```
+By including a control for month, we now see that the true effect of the scorecard was likely even even larger than before at -0.3211. The coefficients on our interaction terms however remain largely unchanged save for a very slight decrease in their standard errors. We can see however that the difference in the effect of the scorecard on search interest varies between high and low income schools and that both are statistically significant at the 0.001 level. The difference in the effect of the scorecard for high income schools turns our to be a -0.2692 standard deviation change in search interest. For low income, the effect is smaller at a -0.1061 standard deviation change in search interest. I still think its worth checking whether the difference between the two coefficients is statistically significant by running a linear hypothesis test on the model:
+```{r}
+linearHypothesis(reg2, 'score_card_implementedTRUE:high_incomeTRUE - score_card_implementedTRUE:low_incomeTRUE = 0')
+```
+The results from the above linear hypothesis test allow us to reject the null hypothesis and because we've controlled for the main source of endogeneity, allow us to conclude that the effect of introducing the scorecard did in fact differ between high income and low income colleges (at least in the way I've defined the terms here).
+
+**Effect of the scorecard on high income colleges:** -0.5903
+**Difference in the effect of the scorecard on high income colleges** (compared to non high income colleges): -0.2692
+**Effect of the scorecard on low income colleges:** -0.4272
+**Difference in the effect of the scorecard on low income colleges** (Compared to non low income colleges): -0.1061
+
+In other words, the introduction of a scorecard decreased the search interest for high income and low income college by -0.5903 and -0.4272 standard deviations respectively.
+This result seems somewhat counter intuitive however since the above results imply that the introduction of a scorecard decreased relative search interest _more_ for high income schools than for low income ones. It would be inappropriate to draw significant conclusions yet but a potential explanation for the results observed is that students had previously _overestimated_ the earnings of college graduates and that this overestimation was stronger among colleges believed to produce relatively high income earning graduates.
